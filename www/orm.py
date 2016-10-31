@@ -4,9 +4,10 @@ import logging
 import aiomysql
 
 
-# 这个函数的作用是输出信息，让你知道这个点程序在做什么
+# 这个函数的作用是输出信息，让你知道这个时间点程序在做什么
 def log(sql, args=()):
     logging.INFO("SQL语句：%s" % sql)
+
 
 # 创建全局连接池
 # 这个函数将来会在app.py的init函数中引用
@@ -36,7 +37,7 @@ async def create_pool(loop, **kw):
 # select和execute方法是实现其他Model类中SQL语句都经常要用的方法
 
 # 将执行SQL的代码封装仅select函数，调用的时候只要传入sql，和sql所需要的一些参数就好
-# sql形参即为sql语句，args表示填入sql的参数值
+# sql参数即为sql语句，args表示要搜索的参数
 # size用于指定最大的查询数量，不指定将返回所有查询结果
 async def select(sql, args, size=None):
     log(sql, args)
@@ -73,8 +74,109 @@ async def execute(sql, args):
             raise
         return affected
 
+# 这个函数在定义元类时被引用，作用是创建一定数量的占位符
+def create_args_string(num):
+    l = []
+    for n in range(num):
+        l.append('?')
+    # 比如说num=3，那l就是['?','?','?']，通过下面这句代码返回一个字符串'?,?,?'
+    return ', '.join(l)
 
-# =====================================Model基类，以及其元类区========================
+# =====================================Field定义域区==============================================
+# 首先来定义Field类，它负责保存数据库表的字段名和字段类型
+
+
+# 父定义域，可以被其他定义域继承
+class Field(object):
+    # 定义域的初始化，包括属性（列）名，属性（列）的类型，主键，默认值
+    def __init__(self, name, column_type, primary_key, default):
+        self.name = name
+        self.column_type = column_type
+        self.primary_key = primary_key
+        self.default = default  # 如果存在默认值，在getOrDefault()中会被用到
+
+    # 定制输出信息为 类名，列的类型，列名
+    def __str__(self):
+        return "<%s, %s:%s>" % (self.__class__.name, self.column_type, self.name)
+
+
+# 字符串域
+class StringField(Field):
+    def __init__(self, name=None, primary_key=False, default=None, ddl=varchar(100)):
+        super().__init__(name, ddl, primary_key, default)
+
+
+# 整数域
+class IntegerField(Field):
+    def __init__(self, name=None, primary_key=False, default=0):
+        super().__init__(name, "bigint", primary_key, default)
+
+# 布尔数域
+class BooleanField(Field):
+    def __init__(self, name=None, primary_key=False, default=False):
+        super().__init__(name, "boolean", primary_key, default)
+
+# 浮点数域
+class FloatField(Field):
+    def __init__(self, name=None, primary_key=False, default=0.0):
+        super().__init__(name, "real", primary_key, default)
+
+# 文本域
+class TextField(Field):
+    def __init__(self, name=None, default=None):
+         super().__init__(name, 'text', False, default)
+
+# =====================================Model基类区==========================================
+
+
+# 编写元类
+class ModelMetaclass(type):
+    def __new__(cls, name, bases, attrs):
+        # 排除Model类本身
+        if name == Model:
+            return type.__new__(cls, name, bases, attrs)
+        # 获取table名称
+        tableName = attrs.get("__table__", None) or name
+        logging.info("发现 Model:%s(table:%s" % (name, tableName))
+        # 获取所有定义域中的属性和主键
+        mappings = dict()
+        fields = []
+        primaryKey = None
+        for k, v in attrs.items():
+            if isinstance(v, Field):
+                logging.info("发现映射：%s ==> %s" % (k, v))
+                mappings[k] = v
+                # 先判断找到的映射是不是主键
+                if v.primary_key:
+                    if primaryKey:  # 若主键已存在,又找到一个主键,将报错,每张表有且仅有一个主键
+                        raise RuntimeError("字段的重复主键:%s" % k)
+                    primaryKey = k
+                else:
+                    fields.append(k)
+        # 如果没有找到主键，也会报错
+        if not primaryKey:
+            raise RuntimeError("未找到主键")
+        # 定义域中的key值已经添加到fields里了，就要在attrs中删除，避免重名导致运行时错误
+        for k in mappings.keys():
+            attrs.pop(k)
+        # 将非主键的属性变形,放入escaped_fields中,方便sql语句的书写
+        escaped_fields = list(map(lambda f: '`%s`' % f, fields))
+        attrs["__mappings__"] = mappings  # 保存属性和列的映射关系
+        attrs["__table"] = tableName  # 表名
+        attrs["__primary_key__"] = primaryKey  # 主键属性名
+        attrs["__field__"] = fields  # 除主键外的属性名
+        # 构造默认的SELECT, INSERT, UPDATE, DELETE语句
+        # 以下都是sql语句
+        attrs["__select__"] = "select `%s`, %s from `%s`" % (primaryKey, ",".join(escaped_fields), tableName)
+        attrs["__insert__"] = " insert into `%s` (%s, `%s`) values (%s)" % (
+        tableName, ",".join(escaped_fields), primaryKey, create_args_string(len(escaped_fields() + 1)))
+        attrs["__update__"] = "update `%s` set %s where `%s`=?" % (
+        tableName, ",".join(map(lambda f: "`%s`=?" % (mappings.get(f).name or f), fields)), primaryKey)
+        attrs["__delete__"] = "delete from `%s` where `%s`=?" % (tableName, primaryKey)
+        return type.__new__(cls, name, bases, attrs)
+
+
+# =====================================Model基类区==========================================
 
 
 # 定义所有ORM映射的基类Model， 使他既可以像字典那样通过[]访问key值，也可以通过.访问key值
@@ -107,92 +209,93 @@ class Model(dict, metaclass=ModelMetaclass):
         value = getattr(self, key, None)
         if value is None:
             # self.__mapping__在metaclass中，用于保存不同实例属性在Model基类中的映射关系
-            # # field是一个定义域!
-            field = self.__mappings[key]
+            # field是一个定义域!
+            field = self.__mappings__[key]
             # 如果field存在default属性，那可以直接使用这个默认值
             if field.default is not None:
                 # 如果field的default属性是callable(可被调用的)，就给value赋值它被调用后的值，如果不可被调用直接返回这个值
-                value = field.default if callable(field.default) else field.default
+                value = field.default() if callable(field.default) else field.default
                 logging.debug("为（%s: %s）使用默认值" % (key, str(value)))
                 # 把默认值设为这个属性的值
                 setattr(self, key, value)
         return value
 
-    # Model类添加class方法，就可以让所有子类调用class方法
+    # ==============往Model类添加类方法，就可以让所有子类调用类方法=================
+
     @ classmethod  # 这个装饰器是类方法的意思，即可以不创建实例直接调用类方法
     async def find(cls, pk):
         '''查找对象的主键'''
+        # select函数之前定义过，这里传入了三个参数分别是之前定义的 sql、args、size
         rs = await select("%s where `%s`=?" % (cls.__select__, slc.__primary_key__), [pk], 1)
         if len(rs) == 0:
             return None
         return cls(**rs[0])
 
-    # 往Model类添加实例方法，就可以让所有子类调用实例方法
+    # findAll() - 根据WHERE条件查找
+    @classmethod
+    async def findall(cls, where=None, args=None, **kw):
+        # sql语句不太会。。这里好像是添加了几个参数 where、args、OrderBy、limit
+        sql = [cls.__select__]
+        # 如果有where参数就在sql语句中添加字符串where和参数where
+        if where:
+            sql.append("where")
+            sql.append(where)
+        if args is None:  # 这个参数是在执行sql语句前嵌入到sql语句中的，如果为None则定义一个空的list
+            args = []
+        # 如果有OrderBy参数就在sql语句中添加字符串OrderBy和参数OrderBy，但是OrderBy是在关键字参数中定义的
+        OrderBy = kw.get("OrderBy", None)
+        if OrderBy:
+            sql.append("OrderBy")
+            sql.append(OrderBy)
+        limit = kw.get("limit", None)
+        if limit is not None:
+            sql.append("limit")
+            if isinstance(limit, int):
+                sql.append("?")
+                args.append(limit)
+            if isinstance(limit, tuple) and len(limit) == 2:
+                sql.append("?,?")
+                args.extend(limit)  # extend() 函数用于在列表末尾一次性追加另一个序列中的多个值（用新列表扩展原来的列表）。
+            else:
+                raise ValueError("错误的limit值：%s" % limit)
+            rs = await select(" ".join(sql), args)
+            return [cls(**r)for r in rs]
+
+    # findNumber() - 根据WHERE条件查找，但返回的是整数，适用于select count(*)类型的SQL。
+    @classmethod
+    async def findNumber(cls, selectField, where=None, args=None):
+        sql = ['select %s _num_ from `%s`' % (selectField, cls.__table__)]
+        if where:
+            sql.append("where")
+            sql.append(where)
+        rs = await select(" ".join(sql), args, 1)
+        if len(rs) == 0:
+            return None
+        return rs[0]['_num_']
+
+    # ===============往Model类添加实例方法，就可以让所有子类调用实例方法===================
+
+    # save、update、remove这三个方法需要管理员权限才能操作，所以不定义为类方法，需要创建实例之后才能调用
     async def save(self):
-        args = list(map(self.getValueOrDefault, self.__fields__))
-        args.append(self.getValueOrDefault(self.__primary_key__))
+        args = list(map(self.getValueOrDefault, self.__fields__))  # 将除主键外的属性名添加到args这个列表中
+        args.append(self.getValueOrDefault(self.__primary_key__))  # 再把主键添加到这个列表的最后
         rows = await execute(self.__insert__, args)
+        if rows != 1:  # 插入纪录受影响的行数应该为1，如果不是1 那就错了
+            logging.warning("无法插入纪录，受影响的行：%s" % rows)
+
+    async def update(self):
+        args = list(map(self.getValue, self.__fields__))
+        args.append(self.getValue(self.__primary_key__))
+        rows = await execute(self.__update__, args)
         if rows != 1:
-            logging.info("无法插入纪录，受影响的行：%s" % rows)
+            logging.warning('failed to update by primary key: affected rows: %s' % rows)
+
+    async def remove(self):
+        args = [self.getValue(self.__primary_key__)]
+        rows = await execute(self.__delete__, args)
+        if rows != 1:
+            logging.warning('failed to remove by primary key: affected rows: %s' % rows)
 
 
-# 父定义域，可以被其他定义域继承
-class Field(object):
-    # 定义域的初始化，包括属性（列）名，属性（列）的类型，主键，默认值
-    def __init__(self, name, column_type, primary_key, default):
-        self.name = name
-        self.column_type = column_type
-        self.primary_key = primary_key
-        self.default = default  # 如果存在默认值，在getOrDefault()中会被用到
 
-    # 定制输出信息为 类名，列的类型，列名
-    def __str__(self):
-        return "<%s, %s:%s>" % (self.__class__.name, self.column_type, self.name)
-
-
-# 定义映射varchar（可变长度字符串）的SrtingField
-class StringField(Field):
-    def __init__(self, name=None, primary_key=None, default=None, ddl=varchar(100)):
-        super().__init__(name, ddl, primary_key, default)
-
-
-# 通过ModelMetaclass将具体的子类的映射信息读取出来
-class ModelMetaclass(type):
-    def __new__(cls, name, bases, attrs):
-        # 排除Model类本身
-        if name == Model:
-            return type.__new__(cls, name, bases, attrs)
-        # 获取table名称
-        tableName = attrs.get("__table__", None) or name
-        logging.info("发现 Model:%s(table:%s" % (name, tableName))
-        # 获取所有的Field和主链名
-        mappings = dict()
-        fields = []
-        primaryKey = None
-        for k, v in attrs.items():
-            if isinstance(v, Field):
-                logging.info("发现映射：%s ==> %s" % (k, v))
-                mappings[k] = v
-                if v.primary_key:
-                    # 找到主键
-                    if primaryKey:
-                        raise RuntimeError("字段的重复主键:%s" % k)
-                    primaryKey = k
-                else:
-                    fields.append(k)
-        if not primaryKey:
-            raise RuntimeError("未找到主键")
-        for k in mappings.keys():
-            attrs.pop(k)
-        escaped_fields = list(map(lambda f: '`%s`' % f, fields))
-        attrs["__mappings__"] = mappings  # 保存属性和列的映射关系
-        attrs["__table"] = tableName
-        attrs["__primary_key__"] = primaryKey  # 主键属性名
-        attrs["__field__"] = fields  # 除主键外的属性名
-        # 构造默认的SELECT, INSERT, UPDATE, DELETE语句
-        attrs["__select__"] = "select `%s`, %s from `%s`" % (primaryKey, ",".join(escaped_fields), tableName)
-        attrs["__insert__"] = " insert into `%s` (%s, `%s`) values (%s)" % (tableName, ",".join(escaped_fields), primaryKey, create_args_string(len(escaped_fields()+1)))
-        attrs["__update__"] = "update `%s` set %s where `%s`=?" % (tableName, ",".join(map(lambda f: "`%s`=?" % (mappings.get(f).name or f), fields)), primaryKey)
-        attrs["__delete__"] = "delete from `%s` where `%s`=?" % (tableName, primaryKey)
-        return type.__new__(cls, name, bases, attrs)
 
