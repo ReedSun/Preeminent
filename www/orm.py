@@ -1,3 +1,8 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+__author__ = 'ReedSun'
+
 import asyncio
 import logging
 # aiomysql是Mysql的python异步驱动程序，操作数据库要用到
@@ -6,30 +11,30 @@ import aiomysql
 
 # 这个函数的作用是输出信息，让你知道这个时间点程序在做什么
 def log(sql, args=()):
-    logging.INFO("SQL语句：%s" % sql)
+    logging.info('SQL: %s' % sql)
 
 
 # 创建全局连接池
 # 这个函数将来会在app.py的init函数中引用
-# 目的是为了让每个HTTP请求都能从连接池中直接获取数据库连接
+# 目的是为了让每个HTTP请求都能s从连接池中直接获取数据库连接
 # 避免了频繁关闭和打开数据库连接
 async def create_pool(loop, **kw):
-    logging.info("创建数据库连接池。。。")
+    logging.info('创建连接池...')
     # 声明变量__pool是一个全局变量，如果不加声明，__pool就会被默认为一个私有变量，不能被其他函数引用
     global __pool
     # 调用一个自协程来创建全局连接池，create_pool的返回值是一个pool实例对象
     __pool = await aiomysql.create_pool(
         # 下面就是创建数据库连接需要用到的一些参数，从**kw（关键字参数）中取出来
         # kw.get的作用应该是，当没有传入参数是，默认参数就是get函数的第二项
-        host=kw.get("host", "localhost"),  # 数据库服务器位置，默认设在本地
-        port=kw.get("port", 3306),  # mysql的端口，默认设为3306
-        user=kw["user"],  # 登陆用户名，通过关键词参数传进来。
-        password=kw["password"],  # 登陆密码，通过关键词参数传进来
-        db=kw["db"],  # 当前数据库名
-        charset=kw.get("charset", "utf-8"),  # 设置编码格式，默认为utf-8
-        autocommit=kw.get("autocommit", True),  # 自动提交模式，设置默认开启
-        maxsize=kw.get("maxsize", 10),  # 最大连接数默认设为10
-        minsize=kw.get("minsize", 1),  # 最小连接数，默认设为1，这样可以保证任何时候都会有一个数据库连接
+        host=kw.get('host', 'localhost'),  # 数据库服务器位置，默认设在本地
+        port=kw.get('port', 3306),  # mysql的端口，默认设为3306
+        user=kw['user'],  # 登陆用户名，通过关键词参数传进来。
+        password=kw['password'],  # 登陆密码，通过关键词参数传进来
+        db=kw['db'],  # 当前数据库名
+        charset=kw.get('charset', 'utf8'),  # 设置编码格式，默认为utf-8
+        autocommit=kw.get('autocommit', True),  # 自动提交模式，设置默认开启
+        maxsize=kw.get('maxsize', 10),  # 最大连接数默认设为10
+        minsize=kw.get('minsize', 1),  # 最小连接数，默认设为1，这样可以保证任何时候都会有一个数据库连接
         loop=loop  # 传递消息循环对象，用于异步执行
     )
 
@@ -45,42 +50,46 @@ async def select(sql, args, size=None):
     global __pool
     # 从连接池中获得一个数据库连接
     # 用with语句可以封装清理（关闭conn)和处理异常工作
-    with (await __pool) as conn:
+    async with __pool.get() as conn:
         # 等待连接对象返回DictCursor可以通过dict的方式获取数据库对象，需要通过游标对象执行SQL
-        cur = await conn.cursor(aiomysql.DictCursor)
-        # 设置执行语句，其中sql语句的占位符为？，而python为%s, 这里要做一下替换
-        # args是sql语句的参数
-        await cur.execute(sql.replace("?", "%s"), args or ())
-        # 如果制定了查询数量，则查询制定数量的结果，如果不指定则查询所有结果
-        if size:
-            rs = await cur.fetchmany(size)  # 从数据库获取指定的行数
-        else:
-            rs = await cur.fetchall()  # 返回所有结果集
-        await cur.close
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            # 设置执行语句，其中sql语句的占位符为？，而python为%s, 这里要做一下替换
+            # args是sql语句的参数
+            await cur.execute(sql.replace('?', '%s'), args or ())
+            # 如果制定了查询数量，则查询制定数量的结果，如果不指定则查询所有结果
+            if size:
+                rs = await cur.fetchmany(size)  # 从数据库获取指定的行数
+            else:
+                rs = await cur.fetchall()  # 返回所有结果集
         logging.info("返回的行数：%s" % len(rs))
         return rs  # 返回结果集
 
 # 定义execute()函数执行insert update delete语句
-async def execute(sql, args):
+async def execute(sql, args, autocommit=True):
     # execute()函数只返回结果数，不返回结果集，适用于insert, update这些语句
     log(sql)
-    with (await __pool) as conn:
+    async with __pool.get() as conn:
+        if not autocommit:
+            await conn.begin()
         try:
-            cur = await conn.cursor()
-            await cur.execute(sql.replace("?", "%s"), args)
-            affected = cur.rowcount  # 返回受影响的行数
-            await cur.close()
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(sql.replace('?', '%s'), args)
+                affected = cur.rowcount  # 返回受影响的行数
+            if not autocommit:
+                await conn.commit()
         except BaseException as e:
+            if not autocommit:
+                await conn.rollback()
             raise
         return affected
 
-# 这个函数在定义元类时被引用，作用是创建一定数量的占位符
+# 这个函数在元类中被引用，作用是创建一定数量的占位符
 def create_args_string(num):
-    l = []
+    L = []
     for n in range(num):
-        l.append('?')
-    # 比如说num=3，那l就是['?','?','?']，通过下面这句代码返回一个字符串'?,?,?'
-    return ', '.join(l)
+        L.append('?')
+    #比如说num=3，那L就是['?','?','?']，通过下面这句代码返回一个字符串'?,?,?'
+    return ', '.join(L)
 
 # =====================================Field定义域区==============================================
 # 首先来定义Field类，它负责保存数据库表的字段名和字段类型
@@ -97,37 +106,34 @@ class Field(object):
 
     # 定制输出信息为 类名，列的类型，列名
     def __str__(self):
-        return "<%s, %s:%s>" % (self.__class__.__name__, self.column_type, self.name)
+        return '<%s, %s:%s>' % (self.__class__.__name__, self.column_type, self.name)
 
 
-# 字符串域
 class StringField(Field):
-    def __init__(self, name=None, primary_key=False, default=None, ddl="varchar(100)"):
+    #ddl是数据定义语言("data definition languages")，默认值是'varchar(100)'，意思是可变字符串，长度为100
+    #和char相对应，char是固定长度，字符串长度不够会自动补齐，varchar则是多长就是多长，但最长不能超过规定长度
+    def __init__(self, name=None, primary_key=False, default=None, ddl='varchar(100)'):
         super().__init__(name, ddl, primary_key, default)
 
-
-# 整数域
-class IntegerField(Field):
-    def __init__(self, name=None, primary_key=False, default=0):
-        super().__init__(name, "bigint", primary_key, default)
-
-
-# 布尔数域
 class BooleanField(Field):
-    def __init__(self, name=None, primary_key=False, default=False):
-        super().__init__(name, "boolean", primary_key, default)
 
+    def __init__(self, name=None, default=False):
+        super().__init__(name, 'boolean', False, default)
 
-# 浮点数域
+class IntegerField(Field):
+
+    def __init__(self, name=None, primary_key=False, default=0):
+        super().__init__(name, 'bigint', primary_key, default)
+
 class FloatField(Field):
+
     def __init__(self, name=None, primary_key=False, default=0.0):
-        super().__init__(name, "real", primary_key, default)
+        super().__init__(name, 'real', primary_key, default)
 
-
-# 文本域
 class TextField(Field):
+
     def __init__(self, name=None, default=None):
-         super().__init__(name, 'text', False, default)
+        super().__init__(name, 'text', False, default)
 
 # =====================================Model基类区==========================================
 
@@ -136,46 +142,46 @@ class TextField(Field):
 class ModelMetaclass(type):
     def __new__(cls, name, bases, attrs):
         # 排除Model类本身
-        if name == "Model":
+        if name=='Model':
             return type.__new__(cls, name, bases, attrs)
         # 获取table名称
-        tableName = attrs.get("__table__", None) or name
-        logging.info("发现 Model:%s(table:%s" % (name, tableName))
+        tableName = attrs.get('__table__', None) or name
+        logging.info('found model: %s (table: %s)' % (name, tableName))
         # 获取所有定义域中的属性和主键
         mappings = dict()
         fields = []
         primaryKey = None
         for k, v in attrs.items():
             if isinstance(v, Field):
-                logging.info("发现映射：%s ==> %s" % (k, v))
+                logging.info('  found mapping: %s ==> %s' % (k, v))
                 mappings[k] = v
                 # 先判断找到的映射是不是主键
                 if v.primary_key:
                     if primaryKey:  # 若主键已存在,又找到一个主键,将报错,每张表有且仅有一个主键
-                        raise RuntimeError("字段的重复主键:%s" % k)
+                        raise StandardError('Duplicate primary key for field: %s' % k)
                     primaryKey = k
                 else:
                     fields.append(k)
         # 如果没有找到主键，也会报错
         if not primaryKey:
-            raise RuntimeError("未找到主键")
+            raise StandardError('Primary key not found.')
         # 定义域中的key值已经添加到fields里了，就要在attrs中删除，避免重名导致运行时错误
         for k in mappings.keys():
             attrs.pop(k)
         # 将非主键的属性变形,放入escaped_fields中,方便sql语句的书写
         escaped_fields = list(map(lambda f: '`%s`' % f, fields))
-        attrs["__mappings__"] = mappings  # 保存属性和列的映射关系
-        attrs["__table"] = tableName  # 表名
-        attrs["__primary_key__"] = primaryKey  # 主键属性名
-        attrs["__fields__"] = fields  # 除主键外的属性名
+        attrs['__mappings__'] = mappings  # 保存属性和列的映射关系
+        attrs['__table__'] = tableName  # 表名
+        attrs['__primary_key__'] = primaryKey  # 主键属性名
+        attrs['__fields__'] = fields  # 除主键外的属性名
         # 构造默认的SELECT, INSERT, UPDATE, DELETE语句
         # 以下都是sql语句
-        attrs["__select__"] = "select `%s`, %s from `%s`" % (primaryKey, ",".join(escaped_fields), tableName)
-        attrs["__insert__"] = " insert into `%s` (%s, `%s`) values (%s)" % (tableName, ",".join(escaped_fields), primaryKey, create_args_string(len(escaped_fields)+1))
-        attrs["__update__"] = "update `%s` set %s where `%s`=?" % (
-        tableName, ",".join(map(lambda f: "`%s`=?" % (mappings.get(f).name or f), fields)), primaryKey)
-        attrs["__delete__"] = "delete from `%s` where `%s`=?" % (tableName, primaryKey)
+        attrs['__select__'] = 'select `%s`, %s from `%s`' % (primaryKey, ', '.join(escaped_fields), tableName)
+        attrs['__insert__'] = 'insert into `%s` (%s, `%s`) values (%s)' % (tableName, ', '.join(escaped_fields), primaryKey, create_args_string(len(escaped_fields) + 1))
+        attrs['__update__'] = 'update `%s` set %s where `%s`=?' % (tableName, ', '.join(map(lambda f: '`%s`=?' % (mappings.get(f).name or f), fields)), primaryKey)
+        attrs['__delete__'] = 'delete from `%s` where `%s`=?' % (tableName, primaryKey)
         return type.__new__(cls, name, bases, attrs)
+
 
 
 # =====================================Model基类区==========================================
@@ -195,7 +201,7 @@ class Model(dict, metaclass=ModelMetaclass):
         try:
             return self[key]
         except KeyError:
-            raise AttributeError(r"'Model'模块没有（%s）这个属性" % key)
+            raise AttributeError(r"'Model' object has no attribute '%s'" % key)
 
     # 设置dict的值的，通过d.k = v 的方式
     def __setattr__(self, key, value):
@@ -217,7 +223,7 @@ class Model(dict, metaclass=ModelMetaclass):
             if field.default is not None:
                 # 如果field的default属性是callable(可被调用的)，就给value赋值它被调用后的值，如果不可被调用直接返回这个值
                 value = field.default() if callable(field.default) else field.default
-                logging.debug("为（%s: %s）使用默认值" % (key, str(value)))
+                logging.debug('using default value for %s: %s' % (key, str(value)))
                 # 把默认值设为这个属性的值
                 setattr(self, key, value)
         return value
@@ -283,17 +289,18 @@ class Model(dict, metaclass=ModelMetaclass):
         args.append(self.getValueOrDefault(self.__primary_key__))  # 再把主键添加到这个列表的最后
         rows = await execute(self.__insert__, args)
         if rows != 1:  # 插入纪录受影响的行数应该为1，如果不是1 那就错了
-            logging.warning("无法插入纪录，受影响的行：%s" % rows)
+            logging.warn("无法插入纪录，受影响的行：%s" % rows)
 
     async def update(self):
         args = list(map(self.getValue, self.__fields__))
         args.append(self.getValue(self.__primary_key__))
         rows = await execute(self.__update__, args)
         if rows != 1:
-            logging.warning('failed to update by primary key: affected rows: %s' % rows)
+            logging.warn('failed to update by primary key: affected rows: %s' % rows)
 
     async def remove(self):
         args = [self.getValue(self.__primary_key__)]
         rows = await execute(self.__delete__, args)
         if rows != 1:
-            logging.warning('failed to remove by primary key: affected rows: %s' % rows)
+            logging.warn('failed to remove by primary key: affected rows: %s' % rows)
+
