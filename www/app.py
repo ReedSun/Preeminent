@@ -143,11 +143,6 @@ def datetime_filter(t):
     return u'%s年%s月%s日' % (dt.year, dt.month, dt.day)
 
 
-
-# 定义首页
-def index(request):
-    return web.Response(body=b"<h1>Preeminent</h1>", content_type="text/html", charset="UTF-8")
-
 # 调用asyncio实现异步IO
 async def init(loop):
     # 创建数据库连接池
