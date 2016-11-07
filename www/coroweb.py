@@ -161,6 +161,7 @@ class RequestHandler(object):
 
         # 如果经过以上处理 kw是None，即上面if语句块没有被执行
         # 则获取请求的abstract math info(抽象数学信息),并以字典形式存入kw
+        # match_info主要是保存像@get('/blog/{id}')里面的id，就是路由路径里的参数
         if kw is None:
             kw = dict(**request.match_info)
 

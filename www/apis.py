@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-__author__ = 'Michael Liao'
+# 几个简单的api错误异常类，用于抛出异常
+
 
 '''
 JSON API definition.
