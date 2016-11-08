@@ -245,23 +245,18 @@ class Model(dict, metaclass=ModelMetaclass):
         # sql语句不太会。。这里好像是添加了几个参数 where、args、OrderBy、limit
         sql = [cls.__select__]
         # 如果有where参数就在sql语句中添加字符串where和参数where
-        print("!1111111111111111111111111111111111")
         if where:
             sql.append("where")
             sql.append(where)
-            print("22222222222222222222222222222")
         if args is None:  # 这个参数是在执行sql语句前嵌入到sql语句中的，如果为None则定义一个空的list
             args = []
-            print("33333333333333333333333333333")
         # 如果有OrderBy参数就在sql语句中添加字符串OrderBy和参数OrderBy，但是OrderBy是在关键字参数中定义的
         orderBy = kw.get("orderBy", None)
         if orderBy:
-            sql.append("orderBy")
+            sql.append("order by")
             sql.append(orderBy)
-            print("4444444444444444444")
         limit = kw.get("limit", None)
         if limit is not None:
-            print("5555555555555555555555555555")
             sql.append("limit")
             if isinstance(limit, int):
                 sql.append("?")
@@ -272,7 +267,6 @@ class Model(dict, metaclass=ModelMetaclass):
             else:
                 raise ValueError("错误的limit值：%s" % limit)
         rs = await select(" ".join(sql), args)
-        print("assssssssssssssssssssssssssssaa")
         return [cls(**r) for r in rs]
 
     # findNumber() - 根据WHERE条件查找，但返回的是整数，适用于select count(*)类型的SQL。
