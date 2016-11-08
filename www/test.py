@@ -5,7 +5,7 @@ from models import User, Blog, Comment
 async def test(loop):
     await orm.create_pool(loop=loop,user='www-data', password='www-data', db='awesome')
 
-    u=User(name='test11',email='test13@test.com',passwd='test',image='about:blank')
+    u=User(name='test20',email='test20@test.com',passwd='test',image='about:blank')
 
     await u.save()
 
