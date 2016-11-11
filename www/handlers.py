@@ -12,7 +12,7 @@ import markdown2
 from aiohttp import web
 
 from coroweb import get, post
-from apis import APIValueError, APIResourceNotFoundError, APIError
+from apis import APIValueError, APIResourceNotFoundError, APIError, APIPermissionError, Page
 
 from models import User, Comment, Blog, next_id
 from config import configs
@@ -161,6 +161,16 @@ def signin():
         '__template__': 'signin.html'
     }
 
+# day12中定义
+# 页面：日志列表页
+@get('/manage/blogs')
+def manage_blogs(*, page='1'):
+    return {
+        '__template__': 'manage_blogs.html',
+        'page_index': get_page_index(page)
+    }
+
+
 # day11中定义
 # 页面：日志创建页
 @get('/manage/blogs/create')
@@ -171,6 +181,16 @@ def manage_create_blog():
         # action的值也将传给js变量action
         # 将在用户提交博客的时候，将数据post到action制定的路径，此处即为创建博客的api
         'action': '/api/blogs'
+    }
+
+
+# day12中定义
+# 页面：博客管理页面
+@get('/manage/blogs')
+def manage_blogs(*, page='1'):
+    return {
+        '__template__': 'manage_blogs.html',
+        'page_index': get_page_index(page)
     }
 
 # ----------------------------------API 功能定义区---------------------------
@@ -301,7 +321,7 @@ def signout(request):
 @asyncio.coroutine
 def api_get_blog(*, id):
     blog = yield from Blog.find(id)
-    return location.assign('/blog/'+result.id)
+    return blog
 
 # day11定义
 # API：实现博客创建功能
@@ -320,3 +340,19 @@ def api_create_blog(request, *, name, summary, content):
     blog = Blog(user_id=request.__user__.id, user_name=request.__user__.name, user_image=request.__user__.image, name=name.strip(), summary=summary.strip(), content=content.strip())
     yield from blog.save()  # 储存博客到数据库中
     return blog  # 返回博客信息
+
+
+# day12定义
+# 获取博客
+@get('/api/blogs')
+@asyncio.coroutine
+def api_blogs(*, page='1'):
+    page_index = get_page_index(page)
+    num = yield from Blog.findNumber('count(id)') # num为博客总数
+    p = Page(num, page_index)  # 创建Page对象（Page对象在apis.py中定义）
+    if num == 0:
+        return dict(page=p, blogs=())  # 若博客数为0,返回字典,将被app.py的response中间件再处理
+    # 博客总数不为0,则从数据库中抓取博客
+    # limit强制select语句返回指定的记录数,前一个参数为偏移量,后一个参数为记录的最大数目
+    blogs = yield from Blog.findAll(orderBy='created_at desc', limit=(p.offset, p.limit))
+    return dict(page=p, blogs=blogs)  # 返回字典,以供response中间件处理
