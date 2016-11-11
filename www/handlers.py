@@ -6,14 +6,73 @@
 
 import re, time, json, logging, hashlib, base64, asyncio
 
+# markdown2模块是一个支持markdown文本输入的模块，是Trent Mick写的开源模块，我们将其拷贝在本文件夹中，在这里调用
+import markdown2  
+
+from aiohttp import web
+
 from coroweb import get, post
+from apis import APIValueError, APIResourceNotFoundError
 
 from models import User, Comment, Blog, next_id
+from config import configs
+
+COOKIE_NAME = 'awesession'  # cookie名，用于设置cookie
+_COOKIE_KEY = configs.session.secret  # cookie密钥，作为加密cookie的原始字符串的一部分
+
+# 通过用户信息计算加密cookie
+def user2cookie(user, max_age):
+    '''
+    Generate cookie str by user.根据用户信息生成cookie
+    '''
+    # build cookie string by: id-expires-sha1
+    # 根据id、过期日期、sha1值生成cookie字符串
+    # expires（失效时间）是当前时间加cookie最大存活时间的字符串
+    expires = str(int(time.time() + max_age))
+    # 利用用户id，加密后的密码，失效时间，加上cookie密钥，组合成待加密的原始字符串
+    s = '%s-%s-%s-%s' % (user.id, user.passwd, expires, _COOKIE_KEY)
+    # 生成加密的字符串，并于用户id，失效时间共同组成cookie
+    L = [user.id, expires, hashlib.sha1(s.encode('utf-8')).hexdigest()]
+    return '-'.join(L)
+
+# 解密cookie
+@asyncio.coroutine
+def cookie2user(cookie_str):
+    '''
+    Parse cookie and load user if cookie is valid.如果cookie是有效的，分析cookie，加载用户信息
+    '''
+    if not cookie_str:
+        return None
+    try:
+        # 解密是加密的逆向过程，因此，先通过“-”拆分cookie，得到用户id，失效时间，以及加密字符串
+        L = cookie_str.split('-') # 返回一个str的list
+        if len(L) != 3: # cookie应该是由三部分组成的，如果得到的不是三部分，则显然出错了
+            return None
+        uid, expires, sha1 = L
+        if int(expires) < time.time(): # 如果过了失效时间，则cookie失效了
+            return None
+        user = yield from User.find(uid)  # 在数据库中查找用户信息
+        if user is None:  # 如果不存在用户名，则也出错了
+            return None
+        # 再用sha1处理得到的信息，与cookie里的sha1对象做对比
+        s = '%s-%s-%s-%s' % (uid, user.passwd, expires, _COOKIE_KEY)
+        # 如果不一致，则说明出错了
+        if sha1 != hashlib.sha1(s.encode('utf-8')).hexdigest():
+            logging.info('invalid sha1')
+            return None
+        user.passwd = '******'
+        # 验证cookie就是为了验证当前用户是否在登陆状态，从而使用户不必再进行登陆
+        # 因此 返回用户信息即可
+        return user
+    except Exception as e:
+        logging.exception(e)
+        return None
 
 
+# 绑定首页
 @get('/')
 def index(request):
-    # summary用于在博客首页上显示的句子,这样真的更有feel
+    # summary用于在博客首页上显示的句子
     summary = 'ReedSun! Come on! You will become a better programmer!'
     # 这里只是手动写blogs的list，并没有调用数据库
     blogs = [
@@ -29,7 +88,22 @@ def index(request):
     }
 
 
-# 用户信息接口,用于返回机器能识别的用户信息
+# 绑定注册页面
+@get('/register')
+def register():
+    return {
+        '__template__': 'register.html'
+    }
+
+# 绑定登陆页面
+@get('/signin')
+def signin():
+    return {
+        '__template__': 'signin.html'
+    }
+
+
+# API：获取用户信息
 @get('/api/users')
 async def api_get_users():
     users = await User.findAll(orderBy="created_at desc")
@@ -38,105 +112,97 @@ async def api_get_users():
     # 以dict形式返回,并且未指定__template__,将被app.py的response factory处理为json
     return dict(users=users)
 
-# 实现用户注册功能
+# API:用户注册
+# 在register.html中将会通过/api/users调用
+# 首先，预编译正则表达式
+# 第一个_RE_EMAIL中的字符含义
+# ^表示行的开头
+# [a-z0-9\.\_]+表示匹配至少一个字母或数字或.或-或_
+# \@表示匹配@
+# [a-z0-9\-\_]+表示匹配至少一个字母或数字或-或_（不匹配.）
+# (\.[a-z0-9\-\_]+){1,4}表示这是一个一个字符到四个字符的分组，匹配第一个字符是.之后匹配字母或数字或-或_
+# $表示行的结尾
 _RE_EMAIL = re.compile(r'^[a-z0-9\.\-\_]+\@[a-z0-9\-\_]+(\.[a-z0-9\-\_]+){1,4}$')
+# [0-9a-f{40}表示匹配40个数字或a-f的字母
 _RE_SHA1 = re.compile(r'^[0-9a-f]{40}$')
 @post('/api/users')
-def api_register_user(*, email, name, passwd):
-    if not name or not name.strip():
+@asyncio.coroutine
+def api_register_user(*, email, name, passwd):  # 注册信息包括用户名邮箱与密码
+    # 验证输入的正确性
+    # 如果没输入name
+    if not name or not name.strip():  # s.strip(rm)函数表示删除s字符串中开头、结尾处，位于rm删除序列的字符
+                                      # 如果rm为空时，默认删除空白字符
         raise APIValueError('name')
-    if not email or not _RE_EMAIL.match(email):
+    # 如果email不符合正则表达式匹配的格式
+    if not email or not _RE_EMAIL.match(email): 
         raise APIValueError('email')
+    # 如果passwd不符合SHA1算法的正则表达式格式
     if not passwd or not _RE_SHA1.match(passwd):
         raise APIValueError('passwd')
+    # 在数据库里查看是否已存在该email
     users = yield from User.findAll('email=?', [email])
+    # users的长度不为零即意味着数据库已存在同名email，抛出异常错误
     if len(users) > 0:
         raise APIError('register:failed', 'email', 'Email is already in use.')
-    uid = next_id()
-    sha1_passwd = '%s:%s' % (uid, passwd)
+
+    # 数据库无相应的email信息，说明是第一次注册
+    uid = next_id()   # next_id是models函数里的用于生成一个基于时间的独一无二的id，作为数据库表中每一行的主键
+    sha1_passwd = '%s:%s' % (uid, passwd)  # 将用户id和密码组合
+    # 创建用户对象，其中密码不是用户输入的密码
+    # unicode格式的对象在进行哈希运算时必须先编码成utf8格式
+    # hashlib.sha1()表示计算一个字符串的sha1值
+    # hash.hexdigest()函数将hash对象转换成16进制表示的字符串
+    # 密码用的是sha1算法，而邮箱用的是md5算法
+    # Gravatar是一项在全球范围内使用的头像服务，不过在中国好像被墙了
     user = User(id=uid, name=name.strip(), email=email, passwd=hashlib.sha1(sha1_passwd.encode('utf-8')).hexdigest(), image='http://www.gravatar.com/avatar/%s?d=mm&s=120' % hashlib.md5(email.encode('utf-8')).hexdigest())
-    yield from user.save()
+    yield from user.save()  # 将用户信息储存到数据库中
+
     # make session cookie:
     r = web.Response()
+    # 刚创建的的用户设置cookie(网站为了辨别用户身份而储存在用户本地终端的数据)
+    # http协议是一种无状态的协议,即服务器并不知道用户上一次做了什么.
+    # 因此服务器可以通过设置或读取Cookies中包含信息,借此维护用户跟服务器会话中的状态
+    # user2cookie设置的是cookie的值，在前面定义的
+    # max_age是cookie的最大存活周期,单位是秒.当时间结束时,客户端将抛弃该cookie.之后需要重新登录
+    # 设置最大存活周琪是24小时
     r.set_cookie(COOKIE_NAME, user2cookie(user, 86400), max_age=86400, httponly=True)
-    user.passwd = '******'
+    user.passwd = '******'  # 修改密码的外部显示为*
+    # 设置content_type，将在data_factory中间件中继续处理
     r.content_type = 'application/json'
+    # json.dump方法将对象序列化为json格式
     r.body = json.dumps(user, ensure_ascii=False).encode('utf-8')
     return r
 
 
 
-COOKIE_NAME = 'awesession'
-_COOKIE_KEY = configs.session.secret
-
-def user2cookie(user, max_age):
-    '''
-    Generate cookie str by user.
-    '''
-    # build cookie string by: id-expires-sha1
-    expires = str(int(time.time() + max_age))
-    s = '%s-%s-%s-%s' % (user.id, user.passwd, expires, _COOKIE_KEY)
-    L = [user.id, expires, hashlib.sha1(s.encode('utf-8')).hexdigest()]
-    return '-'.join(L)
-
-@asyncio.coroutine
-def cookie2user(cookie_str):
-    '''
-    Parse cookie and load user if cookie is valid.
-    '''
-    if not cookie_str:
-        return None
-    try:
-        L = cookie_str.split('-')
-        if len(L) != 3:
-            return None
-        uid, expires, sha1 = L
-        if int(expires) < time.time():
-            return None
-        user = yield from User.find(uid)
-        if user is None:
-            return None
-        s = '%s-%s-%s-%s' % (uid, user.passwd, expires, _COOKIE_KEY)
-        if sha1 != hashlib.sha1(s.encode('utf-8')).hexdigest():
-            logging.info('invalid sha1')
-            return None
-        user.passwd = '******'
-        return user
-    except Exception as e:
-        logging.exception(e)
-        return None
-
-
-@get('/register')
-def register():
-    return {
-        '__template__': 'register.html'
-    }
-
-@get('/signin')
-def signin():
-    return {
-        '__template__': 'signin.html'
-    }
-
+# API：用户登录
 @post('/api/authenticate')
-def authenticate(*, email, passwd):
+@asyncio.coroutine
+def authenticate(*, email, passwd):  # 通过邮箱与密码验证登陆
+    # 验证是否输入了邮箱和密码
     if not email:
         raise APIValueError('email', 'Invalid email.')
     if not passwd:
         raise APIValueError('passwd', 'Invalid password.')
+    # 在数据库中查找email，将以list的形式返回
     users = yield from User.findAll('email=?', [email])
+    # 如果list长度为0，则说明数据库中没有相应的纪录，即用户不存在
     if len(users) == 0:
         raise APIValueError('email', 'Email not exist.')
-    user = users[0]
-    # check passwd:
+    user = users[0] # 取得用户记录.事实上,就只有一条用户记录,只不过返回的是list
+    # 验证密码:
+    # 数据库中存储的并非原始的用户密码,而是加密的字符串
+    # 我们对此时用户输入的密码做相同的加密操作,将结果与数据库中储存的密码比较,来验证密码的正确性
+    # 以下步骤合成为一步就是:sha1 = hashlib.sha1((user.id+":"+passwd).encode("utf-8"))
+    # 对照用户注册时对原始密码的操作(见api_register_user),操作完全一样
     sha1 = hashlib.sha1()
     sha1.update(user.id.encode('utf-8'))
     sha1.update(b':')
     sha1.update(passwd.encode('utf-8'))
     if user.passwd != sha1.hexdigest():
         raise APIValueError('passwd', 'Invalid password.')
-    # authenticate ok, set cookie:
+    # 登录密码验证成功，设置cookie:
+    # 与注册用户部分代码完全一样
     r = web.Response()
     r.set_cookie(COOKIE_NAME, user2cookie(user, 86400), max_age=86400, httponly=True)
     user.passwd = '******'
@@ -144,10 +210,14 @@ def authenticate(*, email, passwd):
     r.body = json.dumps(user, ensure_ascii=False).encode('utf-8')
     return r
 
+# 实现用户登出
 @get('/signout')
 def signout(request):
+    # 请求头部的referer，表示从哪里链接到当前页面的，即获得上一个页面
     referer = request.headers.get('Referer')
+    # 如果referer为None，则说明无前一个网址，可能是用户新打开了一个标签页，则登陆后转到首页
     r = web.HTTPFound(referer or '/')
+    # 通过设置cookie的最大存活时间来删除cookie，从而使登陆状态消失
     r.set_cookie(COOKIE_NAME, '-deleted-', max_age=0, httponly=True)
     logging.info('user signed out.')
     return r

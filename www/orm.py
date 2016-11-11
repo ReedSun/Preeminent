@@ -234,7 +234,7 @@ class Model(dict, metaclass=ModelMetaclass):
     async def find(cls, pk):
         '''查找对象的主键'''
         # select函数之前定义过，这里传入了三个参数分别是之前定义的 sql、args、size
-        rs = await select("%s where `%s`=?" % (cls.__select__, slc.__primary_key__), [pk], 1)
+        rs = await select("%s where `%s`=?" % (cls.__select__, cls.__primary_key__), [pk], 1)
         if len(rs) == 0:
             return None
         return cls(**rs[0])
