@@ -12,7 +12,7 @@ import markdown2
 from aiohttp import web
 
 from coroweb import get, post
-from apis import APIValueError, APIResourceNotFoundError
+from apis import APIValueError, APIResourceNotFoundError, APIError
 
 from models import User, Comment, Blog, next_id
 from config import configs
@@ -20,13 +20,39 @@ from config import configs
 COOKIE_NAME = 'awesession'  # cookie名，用于设置cookie
 _COOKIE_KEY = configs.session.secret  # cookie密钥，作为加密cookie的原始字符串的一部分
 
+
+# 这个函数在day11被定义
+# 在api_create_blog()（实现博客创建功能）中被调用 
+# 验证用户身份
+# 如果没有用户或用户没有管理员属性，报错
+def check_admin(request):
+    if request.__user__ is None or not request.__user__.admin:
+        raise APIPermissionError()
+
+
+# 这个函数在day11中被定义
+# 作用是获取页码
+def get_page_index(page_str):
+    # 将传入的字符转化为页码信息
+    # 实际上就是对页码信息做合法化检查
+    p = 1
+    try:
+        p = int(page_str)
+    except ValueError as e:
+        pass
+    if p < 1:
+        p = 1
+    return p
+
+
+# 这个函数在day10中定义
 # 通过用户信息计算加密cookie
 def user2cookie(user, max_age):
     '''
     Generate cookie str by user.根据用户信息生成cookie
     '''
     # build cookie string by: id-expires-sha1
-    # 根据id、过期日期、sha1值生成cookie字符串
+    # 根据id、过期日期、sha1值生成字符串
     # expires（失效时间）是当前时间加cookie最大存活时间的字符串
     expires = str(int(time.time() + max_age))
     # 利用用户id，加密后的密码，失效时间，加上cookie密钥，组合成待加密的原始字符串
@@ -35,6 +61,17 @@ def user2cookie(user, max_age):
     L = [user.id, expires, hashlib.sha1(s.encode('utf-8')).hexdigest()]
     return '-'.join(L)
 
+# 这个函数在day11中被定义
+# 文本转html
+# 这个函数在get_blog()中被调用
+def text2html(text):
+    # 先用filter函数对输入的文本进行过滤处理，断行，去收尾空白字符
+    # 再用map函数对特殊符号进行转换，在将字符串装入html的<p>标签中
+    lines = map(lambda s: '<p>%s</p>' % s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;'), filter(lambda s: s.strip() != '', text.split('\n')))
+    # lines是一个字符串列表，该字符串即表示html的段落
+    return ''.join(lines)
+
+# 这个函数在day10中被定义
 # 解密cookie
 @asyncio.coroutine
 def cookie2user(cookie_str):
@@ -68,8 +105,9 @@ def cookie2user(cookie_str):
         logging.exception(e)
         return None
 
+# ----------------------------------页面定义区--------------------------------
 
-# 绑定首页
+# 页面：首页
 @get('/')
 def index(request):
     # summary用于在博客首页上显示的句子
@@ -88,20 +126,54 @@ def index(request):
     }
 
 
-# 绑定注册页面
+# day11定义
+# 页面：博客详情页
+@get('/blog/{id}')
+@asyncio.coroutine
+def get_blog(id):
+    blog = yield from Blog.find(id)  # 通过id从数据库中拉去博客信息
+    # 从数据库拉取指定blog的全部评论，按时间降序排序，即最新的排在最前
+    comments = yield from Comment.findAll('blog_id=?', [id], orderBy='created_at desc')
+    # 将每条评论都转化成html格式
+    for c in comments:
+        c.html_content = text2html(c.content)
+    # blog也是markdown格式，将其转化成html格式
+    blog.html_content = markdown2.markdown(blog.content)
+    return {
+        '__template__': 'blog.html',
+        'blog': blog,
+        'comments': comments
+    }
+
+
+# day10中定义
+# 页面：注册页面
 @get('/register')
 def register():
     return {
         '__template__': 'register.html'
     }
 
-# 绑定登陆页面
+# 页面：登陆页面
 @get('/signin')
 def signin():
     return {
         '__template__': 'signin.html'
     }
 
+# day11中定义
+# 页面：日志创建页
+@get('/manage/blogs/create')
+def manage_create_blog():
+    return {
+        '__template__': 'manage_blog_edit.html',
+        'id': '',  # id的值将传给js变量I
+        # action的值也将传给js变量action
+        # 将在用户提交博客的时候，将数据post到action制定的路径，此处即为创建博客的api
+        'action': '/api/blogs'
+    }
+
+# ----------------------------------API 功能定义区---------------------------
 
 # API：获取用户信息
 @get('/api/users')
@@ -223,3 +295,28 @@ def signout(request):
     return r
 
 
+# day11定义
+# API：实现获取单条博客信息的功能
+@get('/api/blogs/{id}')
+@asyncio.coroutine
+def api_get_blog(*, id):
+    blog = yield from Blog.find(id)
+    return location.assign('/blog/'+result.id)
+
+# day11定义
+# API：实现博客创建功能
+@post('/api/blogs')
+@asyncio.coroutine
+def api_create_blog(request, *, name, summary, content):
+    check_admin(request) # 检查用户权限
+    # 验证博客信息的合法性
+    if not name or not name.strip():
+        raise APIValueError('name', 'name cannot be empty.')
+    if not summary or not summary.strip():
+        raise APIValueError('summary', 'summary cannot be empty.')
+    if not content or not content.strip():
+        raise APIValueError('content', 'content cannot be empty.')
+    # 创建博客对象
+    blog = Blog(user_id=request.__user__.id, user_name=request.__user__.name, user_image=request.__user__.image, name=name.strip(), summary=summary.strip(), content=content.strip())
+    yield from blog.save()  # 储存博客到数据库中
+    return blog  # 返回博客信息
