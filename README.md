@@ -13,6 +13,8 @@
 
 其次要感谢在廖大教程下面讨论问题和提出问题的学友们，正是你们的讨论让我在想放弃的时候又坚持了下来，而且大家相互讨论解决问题，也让我在完成实战项目时避开了好多坑。遇到了程序跑不通我又解决不了的时候~我总是第一个想到来评论区取取经。感谢大家~
 
+还要非常非常非常非常感谢已经完成这个实战教程并提供了大量源码注释的同学们，他们是[xwlyy](https://github.com/xwlyy/awesome-python3-webapp)、[KaimingWan](https://github.com/KaimingWan/PureBlog)、[zhouxinkai](https://github.com/zhouxinkai/awesome-python3-webapp)、[Engine-Treasure](https://github.com/Engine-Treasure/awesome-python3-webapp)，非常感谢，给你们点星星啦哈哈~
+
 最后，还是要感谢我自己，在实战进行到中间的时候，因为代码太复杂，我也曾一度想放弃，但最后还是坚持了下来。感谢坚持着努力着的自己~
 
 总结一下这个项目，我做了如下几个方面的工作。
