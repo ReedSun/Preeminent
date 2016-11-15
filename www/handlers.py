@@ -392,6 +392,7 @@ def api_blogs(*, page='1'):
 # day14定义
 # API：获取评论
 @get('/api/comments')
+@asyncio.coroutine
 def api_comments(*, page='1'):
     page_index = get_page_index(page)
     num = yield from Comment.findNumber('count(id)')  # num为评论总数
